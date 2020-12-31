@@ -1,0 +1,375 @@
+Parameters:
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.10.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.10.10.0/24
+
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.10.11.0/24
+
+  AllowedIP:
+    Description: Allowed IP range for Grafana
+    Type: String
+    Default: 0.0.0.0/0
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '', ['VPC'] ]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', ['IGW'] ]
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "Public Subnet (AZ1)"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "Public Subnet (AZ2)"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  WindowsIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+        - ''
+        - ['ec2-role']
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  WindowsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName:
+        Fn::Join:
+        - ''
+        - ['ec2-profile']
+      Path: /
+      Roles:
+        - !Ref WindowsIamRole
+
+  WindowsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Join:
+        - ''
+        - ['ec2-sg']
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '3389'
+        ToPort: '3389'
+        CidrIp: !Ref AllowedIP
+
+  LaunchConfigWindowsServer:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !GetAtt WindowServer2016WithIIS.ImageId
+      IamInstanceProfile: !Ref WindowsInstanceProfile
+      SecurityGroups:
+      - Ref: WindowsSecurityGroup
+      InstanceType: t3.medium
+      EbsOptimized: "true"
+
+  AutoScalingWindowsServer:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchConfigurationName: !Ref LaunchConfigWindowsServer
+      MinSize: '1'
+      MaxSize: '1'
+      HealthCheckGracePeriod: 300
+      MaxInstanceLifetime: 2592000
+      Tags:
+        - Key: Name
+          PropagateAtLaunch: True
+          Value:
+            Fn::Join:
+              - ''
+              - ['Windows Server']
+
+  ImageBuilderInstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      Comment: Role to be used by instance during image build.
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+        Version: "2012-10-17"
+      Path: /executionServiceEC2Role/
+
+  ImageBuilderInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /executionServiceEC2Role/
+      Roles:
+        - Ref: ImageBuilderInstanceRole
+
+  WindowsServer2016ImageInfraConfig:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: WindowsServer-2016-IIS-Image-Infra-Config
+      InstanceProfileName:
+        Ref: ImageBuilderInstanceProfile
+      InstanceTypes:
+        - m5.large
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds: 
+        - Ref: WindowsSecurityGroup
+
+  WindowsServer2016ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: Windows_Server-2016-with-IIS
+      Version: 0.0.1
+      ParentImage: !Sub arn:aws:imagebuilder:${AWS::Region}:aws:image/windows-server-2016-english-full-base-x86/x.x.x
+      Components:
+        - ComponentArn: !Sub arn:aws:imagebuilder:${AWS::Region}:aws:component/windows-server-iis/1.0.0
+
+  WindowServer2016WithIIS:
+    Type: AWS::ImageBuilder::Image
+    Properties:
+      ImageRecipeArn:
+        Ref: WindowsServer2016ImageRecipe
+      InfrastructureConfigurationArn:
+        Ref: WindowsServer2016ImageInfraConfig
+      DistributionConfigurationArn:
+        Ref: DistributionConfiguration
+      Tags:
+        Delete: 'AfterDemo'
+
+  DistributionConfiguration:
+    Type: 'AWS::ImageBuilder::DistributionConfiguration'
+    Properties:
+      Name: 'Windows AMI with IIS'
+      Description: 'Windows AMI with IIS'
+      Distributions:
+        - Region: !Ref "AWS::Region"
+          AmiDistributionConfiguration:
+            Name: 'MyWindowsAMI {{ imagebuilder:buildDate }}'
+            Description: 'Windows AMI with IIS'
+            AmiTags:
+              Delete: 'AfterDemo'
+          LicenseConfigurationArns:
+            - !GetAtt Cleanup.LicenseConfigARN
+      Tags:
+        Delete: 'AfterDemo'
+
+  ImageBuilderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/imagebuilder/Windows_Server-2016-with-IIS
+      RetentionInDays: 30
+
+  Cleanup:
+    Type: Custom::Cleanup
+    Properties:
+      ServiceToken:
+       Fn::GetAtt:
+          - "CleanupLambda"
+          - "Arn"
+
+  CleanupLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/CleanupLambda
+      RetentionInDays: 30
+
+
+  CleanupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: 'CleanupLambdaPolicy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:DescribeLogStreams
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - ec2:DeregisterImage
+            - ec2:DescribeImages
+            - license-manager:CreateLicenseConfiguration
+            - license-manager:DeleteLicenseConfiguration
+            - license-manager:ListLicenseConfigurations
+            - license-manager:GetLicenseConfiguration
+            Resource: '*'
+
+  CleanupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CleanupLambda
+      Handler: "index.lambda_handler"
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt CleanupLambdaRole.Arn
+      Code:
+        ZipFile: !Sub |
+            import json, boto3, logging, os, urllib3
+            import cfnresponse
+            import time
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+
+            def lambda_handler(event, context):
+                logger.info("event: {}".format(event))
+                try:
+                    if event['RequestType'] == 'Delete':
+                        client = boto3.client('ec2')
+                        amis = client.describe_images(
+                            Owners=[
+                                'self',
+                            ],
+                            Filters=[
+                                    {
+                                      'Name': 'tag:Delete',
+                                      'Values': ['AfterDemo']
+                                    }
+                            ]
+                        )
+                        for ami in amis['Images']:
+                            ami_id = ami['ImageId']
+                            client.deregister_image(ImageId=ami_id)
+
+                        licensemanager = boto3.client('license-manager')
+                        licenses = licensemanager.list_license_configurations()
+
+                        for license in licenses['LicenseConfigurations']:
+                            license_conf_arn = license['LicenseConfigurationArn']
+                            getlicenses = licensemanager.get_license_configuration(LicenseConfigurationArn=license_conf_arn)
+                            for tag in getlicenses['Tags']:
+                                if tag['Key'] == 'Delete': 
+                                    licensemanager.delete_license_configuration(LicenseConfigurationArn=license_conf_arn)
+                        responseData = {}
+                        cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                    elif event['RequestType'] == 'Create':
+                        createlicense = boto3.client('license-manager')
+                        licensecreated = createlicense.create_license_configuration(
+                            Name='windows-license-vcpu',
+                            Description='windows-license-vcpu',
+                            LicenseCountingType='vCPU',
+                            LicenseCount=2,
+                            LicenseCountHardLimit=True,
+                            Tags=[
+                                {
+                                    'Key': 'Delete',
+                                    'Value': 'AfterDemo'
+                                },
+                            ]
+                        )
+                        responseData = {}
+                        responseData['LicenseConfigARN'] = licensecreated['LicenseConfigurationArn']
+                        cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                except Exception as e:
+                    logger.info("Exception: {}".format(e))
+                    responseData = {}
+                    cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+Outputs:
+  LicenseConfigurationARN:
+    Description: "LicenseConfigurationARN."
+    Value: !GetAtt Cleanup.LicenseConfigARN
+
